@@ -204,6 +204,9 @@ class DVRouter(DVRouterBase):
 
         ##### Begin Stage 10B #####
 
+        if self.SEND_ON_LINK_UP:
+            self.send_routes(force=True, single_port=port)
+
         ##### End Stage 10B #####
 
     def handle_link_down(self, port):
@@ -216,6 +219,25 @@ class DVRouter(DVRouterBase):
         self.ports.remove_port(port)
 
         ##### Begin Stage 10B #####
+
+        affected_routes = [dst for dst, entry in self.table.items() if entry.port == port]
+        poisoned_routes = {}
+        
+        if self.POISON_ON_LINK_DOWN:
+            current_time = api.current_time()
+            for dst in affected_routes:
+                if dst in self.history:
+                    poisoned_routes[dst] = INFINITY
+                self.table[dst] = TableEntry(
+                    dst=dst,
+                    port=port,
+                    latency=INFINITY,
+                    expire_time=current_time + self.ROUTE_TTL
+                )
+            self.send_routes(force=False)  # Only advertise poison incrementally
+        else:
+            for dst in affected_routes:
+                del self.table[dst]
 
         ##### End Stage 10B #####
 
