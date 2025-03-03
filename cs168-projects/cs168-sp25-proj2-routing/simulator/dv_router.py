@@ -59,6 +59,8 @@ class DVRouter(DVRouterBase):
 
         ##### Begin Stage 10A #####
 
+        self.history = {}
+
         ##### End Stage 10A #####
 
     def add_static_route(self, host, port):
@@ -78,6 +80,9 @@ class DVRouter(DVRouterBase):
 
         ##### Begin Stage 1 #####
 
+        latency = self.ports.get_latency(port)
+        self.table[host] = TableEntry(dst=host, port=port, latency=latency, expire_time=FOREVER)
+
         ##### End Stage 1 #####
 
     def handle_data_packet(self, packet, in_port):
@@ -92,6 +97,15 @@ class DVRouter(DVRouterBase):
         """
         
         ##### Begin Stage 2 #####
+
+        entry = self.table.get(packet.dst)
+        if entry is None:
+            return
+        
+        if entry.latency >= INFINITY:
+            return
+        
+        self.send(packet, port=entry.port)
 
         ##### End Stage 2 #####
 
@@ -108,6 +122,25 @@ class DVRouter(DVRouterBase):
         """
         
         ##### Begin Stages 3, 6, 7, 8, 10 #####
+        
+        ports_to_update = [single_port] if single_port else self.ports.get_all_ports()
+        
+        for port in ports_to_update:
+            for dst, entry in self.table.items():
+                advertised_latency = min(entry.latency, INFINITY)  # Prevent counting to infinity
+                if self.SPLIT_HORIZON and entry.port == port:
+                    continue  # Apply Split Horizon rule
+                if self.POISON_REVERSE and entry.port == port:
+                    advertised_latency = INFINITY  # Apply Poison Reverse rule
+                
+                if not force:
+                    if port not in self.history:
+                        self.history[port] = {}
+                    if dst in self.history[port] and self.history[port][dst] == advertised_latency:
+                        continue  # Skip unchanged routes
+                    self.history[port][dst] = advertised_latency
+                
+                self.send_route(port, dst, advertised_latency)
 
         ##### End Stages 3, 6, 7, 8, 10 #####
 
@@ -118,6 +151,17 @@ class DVRouter(DVRouterBase):
         """
         
         ##### Begin Stages 5, 9 #####
+
+        current_time = api.current_time()
+        expired_routes = [dst for dst, entry in self.table.items() if entry.expire_time <= current_time]
+        for dst in expired_routes:
+            entry = self.table[dst]
+            if self.POISON_EXPIRED:
+                self.table[dst] = TableEntry(
+                    dst=dst, port=entry.port, latency=INFINITY, expire_time=current_time + self.ROUTE_TTL
+                )
+            else:
+                del self.table[dst]
 
         ##### End Stages 5, 9 #####
 
@@ -132,6 +176,19 @@ class DVRouter(DVRouterBase):
         """
         
         ##### Begin Stages 4, 10 #####
+
+        new_latency = route_latency + self.ports.get_latency(port)
+        current_entry = self.table.get(route_dst)
+        table_updated = False
+        
+        if (current_entry is None or new_latency < current_entry.latency) or (current_entry.port == port):
+            self.table[route_dst] = TableEntry(
+                dst=route_dst, port=port, latency=new_latency, expire_time=api.current_time() + self.ROUTE_TTL
+            )
+            table_updated = True
+        
+        if table_updated:
+            self.send_routes(force=False)
 
         ##### End Stages 4, 10 #####
 
